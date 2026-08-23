@@ -35,7 +35,8 @@ git clone https://github.com/OthmanAdi/planning-with-files.git $env:USERPROFILE\
 
 ```powershell
 git clone https://github.com/OthmanAdi/planning-with-files.git
-Copy-Item -Recurse planning-with-files\skills\* $env:USERPROFILE\.claude\skills\
+New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.claude\skills" | Out-Null
+Copy-Item -Recurse planning-with-files\skills\planning-with-files $env:USERPROFILE\.claude\skills\
 ```
 
 ---

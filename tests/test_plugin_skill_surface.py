@@ -14,9 +14,16 @@ a recursive scan of the repository, and still installs to
 
 This test fails if a variant is moved (or a new one is added) directly under
 `skills/`, which would silently put those descriptions back into every session.
+
+The extra depth also invalidated any install that copies `skills/*` wholesale
+into a skills directory: `i18n/` is not a skill, and the five variants land a
+level below where the loader and the `/plan-<lang>` commands look for them.
+The last check below keeps that shape out of the shipped install docs.
 """
 from __future__ import annotations
 
+import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -34,9 +41,48 @@ EXPECTED_VARIANTS = {
 }
 
 
+# A copy command whose source is the whole skills/ directory. Prose that
+# mentions `skills/*/SKILL.md` (the plugin scan) must not match, so the line
+# has to start with the copy verb and the glob has to end the path segment.
+WHOLESALE_COPY_RE = re.compile(r"^\s*(?:cp\s|Copy-Item\b).*skills[\\/]\*(?:\s|$)")
+
+MANUAL_SKILL_COPY_COMMANDS = {
+    "docs/installation.md": (
+        "mkdir -p ~/.claude/skills",
+        "cp -r planning-with-files/skills/planning-with-files ~/.claude/skills/",
+    ),
+    "docs/windows.md": (
+        r'New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.claude\skills" | Out-Null',
+        r"Copy-Item -Recurse planning-with-files\skills\planning-with-files",
+    ),
+}
+
+
 def _plugin_registered_skills():
     """Directory names the Claude Code plugin scan registers (skills/*/SKILL.md)."""
     return {d.name for d in SKILLS_DIR.iterdir() if (d / "SKILL.md").is_file()}
+
+
+def _tracked_markdown():
+    """Every tracked .md file, via git; glob fallback for non-git checkouts."""
+    try:
+        proc = subprocess.run(
+            ["git", "-c", "core.quotepath=off", "ls-files", "--", "*.md"],
+            cwd=str(REPO_ROOT),
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return [REPO_ROOT / line for line in proc.stdout.splitlines() if line]
+    except OSError:
+        pass
+    return [
+        p
+        for p in REPO_ROOT.rglob("*.md")
+        if ".git" not in p.parts and "node_modules" not in p.parts
+    ]
 
 
 class PluginSkillSurfaceTests(unittest.TestCase):
@@ -60,6 +106,41 @@ class PluginSkillSurfaceTests(unittest.TestCase):
             with self.subTest(variant=name):
                 text = (I18N_DIR / name / "SKILL.md").read_text(encoding="utf-8")
                 self.assertIn(f"\nname: {name}\n", text)
+
+    def test_no_doc_installs_by_copying_the_skills_directory(self):
+        docs = _tracked_markdown()
+        self.assertTrue(docs, "no tracked .md files discovered")
+        offenders = []
+        for doc in docs:
+            if not doc.is_file():
+                continue
+            for lineno, line in enumerate(
+                doc.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                if WHOLESALE_COPY_RE.match(line):
+                    rel = doc.relative_to(REPO_ROOT).as_posix()
+                    offenders.append(f"{rel}:{lineno}: {line.strip()}")
+        self.assertFalse(
+            offenders,
+            "install command copies the whole skills/ directory, which since "
+            "v3.11.0 also copies i18n/ (not a skill) and puts the five "
+            "variants a level below where the loader and the /plan-<lang> "
+            "commands look; name skills/planning-with-files instead: "
+            + "; ".join(offenders),
+        )
+
+    def test_manual_skill_copies_create_destination_first(self):
+        for rel, (create_destination, copy_skill) in MANUAL_SKILL_COPY_COMMANDS.items():
+            with self.subTest(doc=rel):
+                text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+                self.assertIn(create_destination, text)
+                self.assertIn(copy_skill, text)
+                self.assertLess(
+                    text.index(create_destination),
+                    text.index(copy_skill),
+                    "the skills directory must exist before the canonical skill "
+                    "directory is copied into it",
+                )
 
 
 if __name__ == "__main__":

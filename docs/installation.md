@@ -98,7 +98,8 @@ If you only want the skill without the full plugin structure:
 
 ```bash
 git clone https://github.com/OthmanAdi/planning-with-files.git
-cp -r planning-with-files/skills/* ~/.claude/skills/
+mkdir -p ~/.claude/skills
+cp -r planning-with-files/skills/planning-with-files ~/.claude/skills/
 ```
 
 ---
