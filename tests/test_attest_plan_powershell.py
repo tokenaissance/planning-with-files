@@ -11,6 +11,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ATTEST = REPO_ROOT / "skills" / "planning-with-files" / "scripts" / "attest-plan.ps1"
+RESOLVER = REPO_ROOT / "skills" / "planning-with-files" / "scripts" / "resolve-plan-dir.ps1"
 SHELL = shutil.which("pwsh") or shutil.which("powershell")
 
 
@@ -22,6 +23,10 @@ class PowerShellAttestationStaticSecurityTests(unittest.TestCase):
             "PowerShell script on Unix. Use scripts/attest-plan.sh instead."
         )
         self.assertGreaterEqual(source.count(refusal), 3)
+        self.assertLess(
+            source.index("if (-not $script:IsWindowsHost)"),
+            source.index('if ($script:IsWindowsHost -and'),
+        )
         self.assertNotIn("[IO.File]::Open($item.FullName", source)
         self.assertNotIn("[IO.File]::WriteAllBytes($Path", source)
         self.assertNotIn("Remove-Item -LiteralPath $Path -Force", source)
@@ -181,6 +186,39 @@ class PowerShellAttestationContainmentTests(unittest.TestCase):
             cleared = self._run(root, {"PLAN_ID": "safe-plan"}, "-Clear")
             self.assertEqual(0, cleared.returncode, cleared.stderr)
             self.assertFalse((plan_dir / ".attestation").exists())
+
+    def test_attest_from_inside_plan_dir_uses_slug_attestation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan_dir = root / ".planning" / "safe-plan"
+            plan_dir.mkdir(parents=True)
+            plan = plan_dir / "task_plan.md"
+            plan.write_text("# First\n", encoding="utf-8")
+            (root / ".planning" / ".active_plan").write_text(
+                "safe-plan\n", encoding="utf-8"
+            )
+
+            initial = self._run(root)
+            self.assertEqual(0, initial.returncode, initial.stderr)
+            attestation = plan_dir / ".attestation"
+            initial_hash = attestation.read_text(encoding="ascii").strip()
+
+            plan.write_text("# Second\n", encoding="utf-8")
+            nested = self._run(plan_dir)
+
+            self.assertEqual(0, nested.returncode, nested.stderr)
+            self.assertNotEqual(
+                initial_hash, attestation.read_text(encoding="ascii").strip()
+            )
+            self.assertFalse((plan_dir / ".plan-attestation").exists())
+
+            shown = self._run(plan_dir, None, "-Show")
+            self.assertEqual(0, shown.returncode, shown.stderr)
+            self.assertIn("SHA-256:", shown.stdout)
+
+            cleared = self._run(plan_dir, None, "-Clear")
+            self.assertEqual(0, cleared.returncode, cleared.stderr)
+            self.assertFalse(attestation.exists())
 
     def test_traversal_plan_id_cannot_attest_legacy_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -394,10 +432,34 @@ class PowerShellAttestationContainmentTests(unittest.TestCase):
             ):
                 self.skipTest("file symlink creation is unavailable on this host")
 
+            resolved = self._run(root, script=RESOLVER)
             result = self._run(root)
 
+            self.assertEqual(0, resolved.returncode, resolved.stderr)
+            self.assertEqual("", resolved.stdout.strip())
             self.assertNotEqual(0, result.returncode)
             self.assertFalse((plan_dir / ".attestation").exists())
+
+    def test_dangling_active_pointer_cannot_attest_legacy_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as outside_tmp:
+            root = Path(tmp)
+            planning = root / ".planning"
+            planning.mkdir()
+            (root / "task_plan.md").write_text("# Legacy decoy\n", encoding="utf-8")
+            external_pointer = Path(outside_tmp) / "pointer.txt"
+            external_pointer.write_text("safe-plan\n", encoding="utf-8")
+            active_pointer = planning / ".active_plan"
+            if not self._make_link("SymbolicLink", active_pointer, external_pointer):
+                self.skipTest("file symlink creation is unavailable on this host")
+            external_pointer.unlink()
+
+            resolved = self._run(root, script=RESOLVER)
+            result = self._run(root)
+
+            self.assertEqual(0, resolved.returncode, resolved.stderr)
+            self.assertEqual("", resolved.stdout.strip())
+            self.assertNotEqual(0, result.returncode)
+            self.assertFalse((root / ".plan-attestation").exists())
 
 
 if __name__ == "__main__":
