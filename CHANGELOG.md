@@ -4,6 +4,64 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.14.0] - 2026-09-02
+
+OpenCode becomes a first-class host through its own plugin system, and issue #235 is fixed. Verified against OpenCode 1.18.21: the plugin loaded from a project config directory, `pwf_init`, `pwf_status` and `pwf_check` appeared in the tool list, `/pwf` and `/pwf-status` in the command list, and a real session message received the framed plan as a synthetic part.
+
+### Added
+- **Native OpenCode plugin `opencode-planning-with-files`** (`.opencode/packages/opencode-planning-with-files/`, npm package, TypeScript). Hooks: `chat.message` appends the framed active plan to every user message (plan head, normalized progress tail, findings pointer) or a once-per-turn ambiguity notice; `tool.execute.after` appends the progress reminder to `write`, `edit`, `patch`, `multiedit` and `apply_patch` output; `experimental.session.compacting` keeps the plan pointer and attestation hash in the compaction context; `event` on `session.idle` runs the completion gate in gated mode and re-prompts the session with the gate reason through the SDK. Tools `pwf_init` (root or `.planning/<date>-<slug>/`, `mode: autonomous` or `gated` with the v3 markers and attestation), `pwf_status`, `pwf_check`. Each session is resolved from its own OpenCode directory; child sessions are never re-prompted.
+- **Plan resolution and gate parity in TypeScript.** Same precedence as `resolve-plan-dir.sh` (`PLAN_ID`, BOM-tolerant `.active_plan`, newest slug, legacy root) with slug validation, lstat-based symlink refusal and containment; the `inject-plan.sh` nested-root rule (only a live nested plan competes; a `PWF_PLAN_ROOT` pin or `PLAN_ID` skips it; `PWF_PLAN_ROOT` fails closed); the `check-complete.sh --gate` decision table with per-field maximum status counting and the shared `.stop_blocks` and `.gate_last_ledger` files; `init-session.sh` markers; the same framed injection format with a content-derived nonce, byte bound, SHA-256 and `DATA ONLY` preamble; attestation refusal for tampered or unattested v3 plans.
+- **Commands** `.opencode/commands/pwf.md` and `pwf-status.md` in OpenCode's own Markdown command format, and a dogfood entry `.opencode/plugins/planning-with-files.ts` that loads the plugin from source when this repository is opened in OpenCode (`.opencode/package.json` now tracked with the `@opencode-ai/plugin` dependency).
+- **Vitest suite** (22 tests: resolver, BOM, ambiguity, pin, framing, tampering, gate counters and stall, mixed status formats, init markers, status, plugin hooks against a fake client, tools) and a `vitest (OpenCode plugin)` CI job that typechecks, builds and tests the package.
+
+### Fixed
+- **`docs/opencode.md` named the wrong install location (closes #235, reported by @luyanfeng).** `npx skills add OthmanAdi/planning-with-files --skill planning-with-files -g` installs to `~/.agents/skills/planning-with-files/`, not `~/.config/opencode/skills/`. OpenCode reads `~/.agents/skills/`, `~/.claude/skills/`, `~/.config/opencode/skills/` and the project-local `.agents/skills/`, `.claude/skills/`, `.opencode/skills/`, so the install works; the page, the `.opencode` skill's restore-context snippets and its file-location table now name the real paths and probe every location.
+- **OpenCode was listed as an Enhanced host on the strength of `hooks:` frontmatter OpenCode never runs.** The tier tables, `MIGRATION.md` and the README now say what each install actually gets: skill-only installs stay notify-only, the native plugin is Tier 2 (follow-up inject).
+
+### Changed
+- README: OpenCode install block and matrix row, command table, hooks reference row, and the host tier bullets name the native plugin; `docs/installation.md` gains the OpenCode route.
+- Version bumped to 3.14.0 across the tracked parity set and the ClawHub stage. The OpenCode plugin package carries its own version (1.0.0), like the Pi extension.
+
+### Fixed (Hermes)
+- **A `PLAN_ID` that did not resolve blacked out injection on Hermes.** The Python resolver returned nothing for a stale slug; `resolve-plan-dir.sh` falls through to the pointer, the newest slug and the legacy root. Both the Hermes plugin and the OpenCode plugin now fall through.
+
+### Verification
+- 25 Vitest tests for the OpenCode plugin plus the Python suite; live load in OpenCode 1.18.21.
+- An independent adversarial review by a second model before release found three confirmed divergences in the first build (a failed session lookup was cached and pinned the session to the server directory, the tools bypassed `PWF_PLAN_ROOT` and `PLANNING_DISABLED`, a stale `PLAN_ID` did not fall through) plus a missing idempotency guard, an untested link-escape path, a rootless Windows pin, ledger counting that differed from `grep -c ''`, and a non-unique attestation temp file. All fixed with tests.
+
+### Thanks
+- Luyanfeng reported the install path mismatch in issue #235, the second OpenCode docs bug they caught.
+
+## [3.13.0] - 2026-09-01
+
+Hermes Agent by Nous Research becomes a first-class host, on the CLI and in Hermes Desktop. Every claim in this entry was checked against the Hermes v0.19.1 source and a live install: the plugin was loaded through Hermes' own plugin manager, and the skill bundle was scanned with Hermes' `skills-guard`.
+
+### Added
+- **Hermes plugin 0.2.0: slug-mode plans, the completion gate, real slash commands, a bundled skill.** The native plugin (`.hermes/plugins/planning-with-files/`) now resolves the active plan the way every other host does: `PLAN_ID`, then `.planning/.active_plan`, then the newest `.planning/<slug>/task_plan.md`, then the legacy root file, with the same slug validation and containment rules as `resolve-plan-dir.sh` (including a BOM-tolerant `.active_plan`) and the same nested-root ambiguity rule as `inject-plan.sh`: only a live nested plan (`<child>/.planning/<slug>/task_plan.md`) competes, a `PWF_PLAN_ROOT` pin, an attached session or an explicit `PLAN_ID` skips the check, legacy root plans are guarded too, and the refusal is announced once per turn. Slug plans read their attestation from `<slug>/.attestation` and their mode from `<slug>/.mode`; the injection names the resolved plan. `PWF_PLAN_ROOT` pins the project root and fails closed, and `PLANNING_DISABLED=1` silences every hook. Before this release the adapter only ever saw a root `task_plan.md`, so any plan created with `init-session.sh <name>` was invisible on Hermes.
+- **Completion gate on Hermes.** The plugin registers `pre_verify`, Hermes' verification-loop hook, and answers it with a continuation request while an `in_progress` phase remains in a gated plan. The decision table is the one `check-complete.sh --gate` applies (gate token, in_progress phase, block cap `PWF_GATE_CAP`, ledger stall, per-field maximum of `**Status:**` and inline `[in_progress]` markers so mixed-format plans cannot slip past), implemented in Python so Hermes Desktop on Windows needs no `sh`; both routes share `.stop_blocks` and `.gate_last_ledger`. Hermes fires the hook only on turns that changed files and caps continuations at `agent.max_verify_nudges` (default 3), so Hermes sits in Tier 2 (follow-up inject) next to Cursor, Pi and Kiro.
+- **`/pwf`, `/pwf-status`, `/plan-status`** registered through `ctx.register_command`, so they work in `hermes chat`, gateway sessions and Desktop. `/pwf --gated Night run` creates `.planning/YYYY-MM-DD-night-run/`, writes `.mode`, `.nonce`, resets the gate counter and attests the plan, mirroring `init-session.sh --gated`. `planning_with_files_init` gained `name` and `mode` parameters for the same operations from the model. `/plan` is Hermes' own bundled skill and is deliberately not shadowed.
+- **Bundled skill registration** through `ctx.register_skill`, so `skill_view("planning-with-files:planning-with-files")` works even when the hub install was skipped, and a Python completion check that reports `"route": "python"` when `sh` is absent.
+- **Shell-hook bridge** (`shell_hook.py` in the plugin directory) for users who prefer Hermes' config-file hooks: it runs the canonical `inject-plan.sh` and `gate-stop.sh` and translates their output to the Hermes wire shapes. Documented as a CLI-only advanced route.
+- **`tests/test_hermes_first_class.py`**, 18 tests: resolver precedence, invalid slugs, `PWF_PLAN_ROOT`, the ambiguity rule, `PLANNING_DISABLED`, slug attestation, the gate (block, counter, stall, cap), legacy and autonomous plans never held, `init_plan` markers, the Python completion fallback, registration against a full and a reduced `PluginContext`, the slash commands, the manifest, and the shell-hook bridge end to end.
+- **README sections**: "Built for long-running agent tasks", "Hermes Agent: first-class support (CLI and Desktop)" and "Multi-agent runs: orchestrators, workers and subagents", each grounded in mechanisms that already ship.
+
+### Fixed
+- **The `.hermes` SKILL.md pointed Windows users at `~\.hermes`.** Native Windows Hermes keeps its home under `%LOCALAPPDATA%\hermes` (`hermes_constants._get_platform_default_hermes_home`); both restore-context blocks now fall back to that path.
+- **`.hermes/commands/plan.md` and `plan-status.md` were never loaded.** Hermes has no Markdown command loader; the two commands documented since v2.35.0 did nothing. The plugin registers them now, and the Markdown files stay as documentation of the intent.
+- **`docs/hermes.md` claimed Hermes had no stop-hook equivalent.** Current Hermes exposes `pre_verify`; the page now documents the gate, its limits, the Desktop route, the Windows paths and the `hermes import-agent claude-code` migration, and states that the canonical `skills/planning-with-files` path is refused by Hermes' `skills-guard` scanner (hook frontmatter, command substitution, deep relative links, `os.environ` in the canonical catchup script) while the `.hermes` bundle scans `SAFE`. The bundle is the supported install path: `hermes skills install OthmanAdi/planning-with-files/.hermes/skills/planning-with-files` and `hermes plugins install OthmanAdi/planning-with-files/.hermes/plugins/planning-with-files`.
+
+### Changed
+- README reorganized for readability: install routes, the collapsible platform and FAQ sections, and the new feature sections come first; benchmarks, the repository layout, releases, community and documentation form the reference half at the bottom. No content was removed; the "At a glance" test count now reflects the current suite.
+- Host capability tier tables in the English SKILL.md copies (canonical, `.agents`, `.pi`, ClawHub stage) and `MIGRATION.md` list Hermes Agent under Tier 2. The translated variants keep their own tables.
+- The Hermes SKILL.md frontmatter carries `metadata.hermes.tags` for hub categorization; the description is unchanged.
+- Version bumped to 3.13.0 across the tracked parity set plus the ClawHub stage. `.continue`, `.gemini`, `.pi` SKILL.md and `.kiro` lag intentionally.
+
+### Verification
+- 60 existing Hermes-related tests plus the new ones pass; the full suite is green on this machine.
+- An independent adversarial review by a second model before release found four divergences from the shell route in the first build (an over-broad and silent nested-root rule, a pin that did not clear ambiguity, an unguarded legacy root, and mixed-format plans slipping the gate) plus a BOM in `.active_plan` selecting the wrong plan. All were fixed and are covered by tests, including a differential test that runs `inject-plan.sh` and the Python resolver over the same fixtures.
+- Live load in the Hermes 0.19.1 plugin manager (scratch `HERMES_HOME`): three hooks, three commands and the bundled skill registered; `planning_with_files_init` produced an attested gated slug plan; `pre_llm_call` injected it with its plan id; `pre_verify` returned the continuation through `get_pre_verify_continue_message`; a stale attestation was refused with `context blocked: PLAN TAMPERED`; the write reminder arrived on the next turn.
+- `hermes skills inspect` and `hermes skills install` of the `.hermes` bundle succeed from the hub with a `SAFE` verdict; the canonical path is blocked with a dangerous verdict, which is why the docs name the bundle path.
+
 ## [3.12.1] - 2026-08-31
 
 ### Fixed
