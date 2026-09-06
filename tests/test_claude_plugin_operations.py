@@ -132,7 +132,7 @@ class ClaudePluginLauncherTests(unittest.TestCase):
         self._write_script("resolve-plan-dir.sh", "#!/bin/sh\npwd\n")
         self._write_script(
             "inject-plan.sh",
-            "#!/bin/sh\nprintf 'Windows C:\\\\Users\\\\name\\tbad\\rvalue\\nsecond'\n",
+            "#!/bin/sh\nprintf 'Windows C:\\\\Users\\\\name; literal \\\\n; tab\\tbad; carriage\\rvalue\\nsecond'\n",
         )
         self._write_script(
             "session-catchup.py",
@@ -150,7 +150,7 @@ class ClaudePluginLauncherTests(unittest.TestCase):
         output = payload["hookSpecificOutput"]
         self.assertEqual("SessionStart", output["hookEventName"])
         self.assertEqual(
-            "CATCHUP FIRST\nWindows C:\\Users\\name bad value\nsecond",
+            "CATCHUP FIRST\nWindows C:\\Users\\name; literal \\n; tab bad; carriage value\nsecond",
             output["additionalContext"],
         )
 

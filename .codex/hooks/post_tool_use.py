@@ -10,10 +10,17 @@ def main() -> None:
     if root is None:
         return  # broken PWF_PLAN_ROOT pin fails closed (issue #212); notice is userprompt-only
 
-    if not adapter.is_session_attached(root, adapter.session_id_from_payload(payload)):
+    session_id = adapter.session_id_from_payload(payload)
+    if not adapter.is_session_attached(root, session_id):
+        return
+    if adapter.session_plan_requires_binding(root):
         return
 
-    stdout, _ = adapter.run_shell_script("post-tool-use.sh", root)
+    stdout, _ = adapter.run_shell_script(
+        "post-tool-use.sh",
+        root,
+        session_id=session_id,
+    )
     if stdout:
         # The nudge is addressed to Claude, so it belongs in the model's
         # context, not in a systemMessage (issue #239). systemMessage is a

@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.16.1] - 2026-09-05
+
+### Fixed
+- The Claude plugin and standalone hook JSON encoders now preserve literal backslashes under POSIX awk, including Windows paths and text containing a literal `\n` sequence.
+- Attached Codex, Hermes and Pi sessions could follow another task's shared `.active_plan` pointer. When session isolation is armed and multiple plans exist, these routes and the shared standalone hooks now require `PLAN_ID`. An attachment no longer bypasses nested-root ambiguity checks.
+- Standalone skill PreToolUse and PostToolUse messages were emitted as plain stdout, which Claude Code does not deliver to the model for those events. A shared helper now reads the native JSON session identity and emits `additionalContext`, respects opt-out and rejected selectors, and throttles the progress reminder per turn with a private cache.
+- The native Codex PostToolUse adapter dropped the session ID before writing its reminder marker, while UserPromptSubmit used the real ID to clear it. Both operations now address the same session entry.
+- Installed packages were missing the advertised loop template, and six IDE bundles lacked the Stop dispatcher. The sync inventory now ships the complete dependency chain. Standalone documentation links resolve outside the repository layout.
+- Recovery instructions now read and initialize files in the selected task directory, preserve existing files, and assign one orchestrator to shared planning summaries across the maintained hook-bearing variants.
+
+### Changed
+- Security guidance describes local hash attestation as a digest check while the saved digest remains trusted, not proof of human approval or protection against a writer replacing both files. The write guard is advisory and does not lock, merge or detect every overwritten summary.
+- PreCompact documentation identifies its output as diagnostic. Claude Code does not support `additionalContext` for that event, so it cannot force a model to flush progress before compaction.
+- Version parity advances to 3.16.1; the native Hermes plugin advances to 0.2.1 and the Pi extension to 1.2.6.
+
+### Thanks
+- @hzura and @wangxiaodong1021, for the parallel-session discussion and crossover reports in #50.
+- @sortakool, for the model-context delivery report in #239 that led to checking the standalone route and native session cache.
+- @oaabahussain, for the plan-content trust-boundary discussion in #150.
+
 ## [3.16.0] - 2026-09-03
 
 The PostToolUse progress reminder was addressed to Claude and delivered to the user instead, on every matching tool call, with `Bash` in the matcher. Reported by @sortakool in #239, filed shortly after #236 to #238 and fixed on its own.

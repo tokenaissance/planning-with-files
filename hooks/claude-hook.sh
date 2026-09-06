@@ -21,15 +21,19 @@ SESSION_CATCHUP="${SCRIPTS_DIR}/session-catchup.py"
 
 # JSON-string encode bounded, trusted hook output without requiring Python or
 # Node. The planning scripts already bound injected project data; this removes
-# remaining JSON-forbidden control bytes and preserves line boundaries.
+# remaining JSON-forbidden control bytes and preserves line boundaries. Walk
+# characters directly because awk gsub replacement escaping varies by runtime.
 json_string() {
     tr '\001-\011\013-\037' ' ' \
         | awk 'BEGIN { first = 1 }
             {
-                gsub(/\\/, "\\\\")
-                gsub(/"/, "\\\"")
                 if (!first) printf "\\n"
-                printf "%s", $0
+                for (i = 1; i <= length($0); i++) {
+                    c = substr($0, i, 1)
+                    if (c == "\\") printf "%s", "\\\\"
+                    else if (c == "\"") printf "%s", "\\\""
+                    else printf "%s", c
+                }
                 first = 0
             }'
 }

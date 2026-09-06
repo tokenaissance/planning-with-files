@@ -171,14 +171,35 @@ slug_is_valid() {
     return 1
 }
 
-# EXPLICIT tracks WHO chose the plan (issue #212). A valid PLAN_ID, a valid
-# PWF_PLAN_ROOT pin, or an attached session all name the plan deliberately.
+# An attachment admits a session but does not select one of several plans.
+# When isolation is armed, require PLAN_ID if more than one live same-root
+# candidate exists. PWF_PLAN_ROOT selects the project root, not a plan within
+# that root.
+if [ "$SESSION_ATTACHED" = "1" ] && [ -z "${PLAN_ID:-}" ]; then
+    SESSION_PLAN_N=0
+    [ -f "${PLAN_PREFIX}task_plan.md" ] && SESSION_PLAN_N=1
+    for candidate in "${PLAN_PREFIX}".planning/*/task_plan.md; do
+        [ -f "$candidate" ] || continue
+        candidate_dir="${candidate%/task_plan.md}"
+        candidate_slug="${candidate_dir##*/}"
+        slug_is_valid "$candidate_slug" || continue
+        SESSION_PLAN_N=$((SESSION_PLAN_N + 1))
+        [ "$SESSION_PLAN_N" -gt 1 ] && break
+    done
+    if [ "$SESSION_PLAN_N" -gt 1 ]; then
+        echo "[planning-with-files] Multiple plans are available while session isolation is armed. Set PLAN_ID=<slug> for this session; nothing injected."
+        exit 0
+    fi
+fi
+
+# EXPLICIT tracks who selected the effective project root or plan for the
+# nested-root conflict check. A valid PLAN_ID names a plan deliberately and a
+# valid PWF_PLAN_ROOT chooses the project root deliberately.
 # The .active_plan pointer, the newest-by-mtime fallback, and the legacy root
 # task_plan.md are cwd GUESSES — only guesses are subject to the nested-root
 # conflict check below. Mirrors scripts/inject-plan.sh.
 EXPLICIT=0
 [ -n "$PLAN_PREFIX" ] && EXPLICIT=1
-[ "$SESSION_ATTACHED" = "1" ] && EXPLICIT=1
 if [ -n "${PLAN_ID:-}" ] && slug_is_valid "$PLAN_ID" && [ -d "${PLAN_PREFIX}.planning/${PLAN_ID}" ]; then
     EXPLICIT=1
 fi

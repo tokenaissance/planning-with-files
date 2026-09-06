@@ -106,6 +106,12 @@ These amazing people have contributed code, documentation, or significant improv
 
 ### Other Contributors
 
+- **[@hzura](https://github.com/hzura)**, [Issue #50](https://github.com/OthmanAdi/planning-with-files/issues/50)
+  - Raised the same-repository parallel-task workflow that led to explicit plan selection and shared-file ownership guidance.
+
+- **[@wangxiaodong1021](https://github.com/wangxiaodong1021)**, [Issue #50](https://github.com/OthmanAdi/planning-with-files/issues/50)
+  - Reported session crossover during parallel Codex work, prompting reproduction with two attached sessions and separate plan pins.
+
 - **[Raymond Manaloto](https://github.com/sortakool)** - [Issue #234](https://github.com/OthmanAdi/planning-with-files/issues/234), [Issue #236](https://github.com/OthmanAdi/planning-with-files/issues/236), [Issue #237](https://github.com/OthmanAdi/planning-with-files/issues/237), [Issue #238](https://github.com/OthmanAdi/planning-with-files/issues/238), [Issue #239](https://github.com/OthmanAdi/planning-with-files/issues/239)
   - Reproduced the nested attestation failure and traced it to the fallback from slug mode to legacy mode when the helper runs inside `.planning/<slug>/`
   - Found that `plan-doctor.sh` matched its control strings against the injected plan body, so a plan quoting one of them reported a false tamper warning, and that a stale literal at `:92` made a fully dark-hooks state report PASS. Supplied the structural alternative that replaced the string matching, and the four test arms
@@ -415,6 +421,6 @@ If you've contributed and don't see your name here, please open an issue! We wan
 
 ---
 
-**Total Contributors:** 56+ and growing!
+**Total Contributors:** 58+ and growing!
 
-*Last updated: September 2, 2026*
+*Last updated: 2026-09-05*

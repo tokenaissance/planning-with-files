@@ -33,6 +33,7 @@ TEMPLATES = [
     "templates/findings.md",
     "templates/progress.md",
     "templates/task_plan.md",
+    "templates/loop.md",
     "templates/analytics_task_plan.md",
     "templates/analytics_findings.md",
 ]
@@ -57,18 +58,16 @@ SCRIPTS = [
     "scripts/plan-doctor.sh",
 ]
 
-# Hook dispatch targets (issue #212): every hook-bearing SKILL.md dispatches
-# its UserPromptSubmit/PreToolUse/PreCompact scalars to inject-plan.sh, and
-# inject-plan.sh shells its sibling ledger-summary.sh in autonomous/gated mode.
-# ledger-summary.sh in turn shells its sibling resolve-plan-dir.sh; when the
-# resolver is missing it falls back to plan_dir="." and injects a false
-# "phases: 0/0 complete" into an autonomous loop. All three must ship in every
-# variant's own scripts/ dir or the dispatch resolves to nothing, or to a lying
-# summary, on that host (tests/test_skill_hook_dispatch_parity.py pins this).
+# Every hook-bearing SKILL.md dispatches through skill-hook.sh. Its sibling
+# injector needs ledger-summary.sh and resolve-plan-dir.sh; Stop also needs
+# gate-stop.sh and the shared check-complete.sh. Ship the complete dependency
+# chain in every variant's own scripts directory.
 HOOK_DISPATCH_SCRIPTS = [
     "scripts/inject-plan.sh",
     "scripts/ledger-summary.sh",
     "scripts/resolve-plan-dir.sh",
+    "scripts/skill-hook.sh",
+    "scripts/gate-stop.sh",
 ]
 
 # .agents/ ships the FULL canonical surface (no IDE adapter layer exists to
@@ -82,6 +81,7 @@ AGENTS_EXTRA_SCRIPTS = [
     "scripts/ledger-summary.ps1",
     "scripts/phase-status.sh",
     "scripts/phase-status.ps1",
+    "scripts/skill-hook.sh",
 ]
 AGENTS_EXTRA_TEMPLATES = [
     "templates/task_plan_autonomous.md",
@@ -192,6 +192,7 @@ IDE_MANIFESTS = {
             "scripts/ledger-summary.ps1",
             "scripts/phase-status.sh",
             "scripts/phase-status.ps1",
+            "scripts/skill-hook.sh",
         ],
     ),
 
@@ -308,6 +309,14 @@ def _build_agents_manifest():
 
 
 IDE_MANIFESTS[".agents"] = _build_agents_manifest()
+
+# The plugin fallback resolves helpers beside the root injector. Keep the new
+# standalone adapter and its loop asset in the same verified inventory.
+IDE_MANIFESTS["."] = {
+    "scripts/inject-plan.sh": "scripts/inject-plan.sh",
+    "scripts/skill-hook.sh": "scripts/skill-hook.sh",
+    "templates/loop.md": "templates/loop.md",
+}
 
 
 # ─── Utility functions ─────────────────────────────────────────────

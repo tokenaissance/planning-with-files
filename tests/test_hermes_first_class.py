@@ -262,7 +262,7 @@ class HermesFirstClassTests(unittest.TestCase):
             hooks_module.post_tool_call(tool_name="write_file", session_id="s1", args={"path": "a", "content": "b"})
             self.assertEqual([], hook_state_module.pop_reminders(root, "s1"))
 
-    def test_pin_and_session_attachment_clear_the_ambiguity(self) -> None:
+    def test_pin_clears_nested_ambiguity_but_attachment_does_not(self) -> None:
         with self._workspace() as root:
             self._slug_plan(root, "2026-09-01-parent", pointer=True)
             live = root / "service" / ".planning" / "2026-09-01-child"
@@ -284,7 +284,142 @@ class HermesFirstClassTests(unittest.TestCase):
             (sessions / f"{key}.attached").write_text("attached\n", encoding="ascii")
             attached = self._pre_llm("s1")
             assert attached is not None
-            self.assertIn("plan: 2026-09-01-parent", attached["context"])
+            self.assertIn("Ambiguous plan", attached["context"])
+            self.assertNotIn("plan: 2026-09-01-parent", attached["context"])
+
+    def test_attached_sessions_require_distinct_plan_ids_for_same_root_plans(self) -> None:
+        with self._workspace() as root:
+            alpha = self._slug_plan(
+                root, "plan-a", text=GATED_PLAN.replace("Night run", "PLAN-A"),
+                mode="autonomous gate", attest=True, pointer=True,
+            )
+            beta = self._slug_plan(
+                root, "plan-b", text=GATED_PLAN.replace("Night run", "PLAN-B"),
+                mode="autonomous gate", attest=True,
+            )
+            os.chdir(root)
+            sessions = root / ".planning" / "sessions"
+            sessions.mkdir()
+            for session_id in ("s1", "s2"):
+                key = hook_state_module.state_key(root, session_id)
+                (sessions / f"{key}.attached").write_text("attached\n", encoding="ascii")
+
+            for pointer in ("plan-a", "plan-b"):
+                (root / ".planning" / ".active_plan").write_text(
+                    pointer + "\n", encoding="utf-8"
+                )
+                for session_id in ("s1", "s2"):
+                    with self.subTest(pointer=pointer, session=session_id):
+                        result = self._pre_llm(session_id)
+                        assert result is not None
+                        self.assertIn("Set PLAN_ID=<slug>", result["context"])
+                        self.assertNotIn("PLAN-A", result["context"])
+                        self.assertNotIn("PLAN-B", result["context"])
+                        self.assertIsNone(self._pre_verify(session_id))
+                        hooks_module.post_tool_call(
+                            tool_name="write_file", session_id=session_id,
+                            args={"path": "a", "content": "b"},
+                        )
+                        self.assertEqual(
+                            [], hook_state_module.pop_reminders(root, session_id)
+                        )
+
+            os.environ["PLAN_ID"] = "plan-a"
+            selected_a = self._pre_llm("s1")
+            assert selected_a is not None
+            self.assertIn("PLAN-A", selected_a["context"])
+            self.assertNotIn("PLAN-B", selected_a["context"])
+            os.environ["PLAN_ID"] = "plan-b"
+            selected_b = self._pre_llm("s2")
+            assert selected_b is not None
+            self.assertIn("PLAN-B", selected_b["context"])
+            self.assertNotIn("PLAN-A", selected_b["context"])
+            self.assertEqual(alpha.name, "plan-a")
+            self.assertEqual(beta.name, "plan-b")
+
+    def test_armed_single_plan_and_legacy_multiple_plans_keep_resolution(self) -> None:
+        with self._workspace() as root:
+            self._slug_plan(root, "plan-a", text="# PLAN-A\n", pointer=True)
+            os.chdir(root)
+            sessions = root / ".planning" / "sessions"
+            sessions.mkdir()
+            key = hook_state_module.state_key(root, "s1")
+            (sessions / f"{key}.attached").write_text("attached\n", encoding="ascii")
+            armed = self._pre_llm("s1")
+            assert armed is not None
+            self.assertIn("PLAN-A", armed["context"])
+
+            shutil.rmtree(sessions)
+            self._slug_plan(root, "plan-b", text="# PLAN-B\n", pointer=True)
+            legacy = self._pre_llm("unattached")
+            assert legacy is not None
+            self.assertIn("PLAN-B", legacy["context"])
+
+    def test_armed_root_and_slug_plans_require_a_plan_id(self) -> None:
+        with self._workspace() as root:
+            (root / "task_plan.md").write_text("# ROOT-PLAN\n", encoding="utf-8")
+            self._slug_plan(root, "plan-a", text="# PLAN-A\n", pointer=True)
+            os.chdir(root)
+            sessions = root / ".planning" / "sessions"
+            sessions.mkdir()
+            key = hook_state_module.state_key(root, "s1")
+            (sessions / f"{key}.attached").write_text("attached\n", encoding="ascii")
+
+            result = self._pre_llm("s1")
+            assert result is not None
+            self.assertIn("Set PLAN_ID=<slug>", result["context"])
+            self.assertNotIn("ROOT-PLAN", result["context"])
+            self.assertNotIn("PLAN-A", result["context"])
+            self.assertIsNone(self._pre_verify("s1"))
+
+            os.environ["PLAN_ID"] = "plan-a"
+            selected = self._pre_llm("s1")
+            assert selected is not None
+            self.assertIn("PLAN-A", selected["context"])
+            self.assertNotIn("ROOT-PLAN", selected["context"])
+
+    def test_plan_root_pin_alone_does_not_select_a_same_root_plan(self) -> None:
+        with self._workspace() as parent:
+            root = parent / "project"
+            root.mkdir()
+            self._slug_plan(root, "plan-a", text="# PLAN-A\n", pointer=True)
+            self._slug_plan(root, "plan-b", text="# PLAN-B\n")
+            os.chdir(parent)
+            os.environ["PWF_PLAN_ROOT"] = str(root)
+            sessions = root / ".planning" / "sessions"
+            sessions.mkdir()
+            key = hook_state_module.state_key(root, "s1")
+            (sessions / f"{key}.attached").write_text("attached\n", encoding="ascii")
+            result = self._pre_llm("s1")
+            assert result is not None
+            self.assertIn("Set PLAN_ID=<slug>", result["context"])
+            self.assertNotIn("PLAN-A", result["context"])
+            self.assertNotIn("PLAN-B", result["context"])
+
+    def test_invalid_and_linked_plan_entries_do_not_create_candidates(self) -> None:
+        with self._workspace() as root:
+            self._slug_plan(root, "plan-a", text="# PLAN-A\n", pointer=True)
+            invalid = root / ".planning" / "bad slug"
+            invalid.mkdir()
+            (invalid / "task_plan.md").write_text("# INVALID\n", encoding="utf-8")
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "task_plan.md").write_text("# OUTSIDE\n", encoding="utf-8")
+            try:
+                (root / ".planning" / "linked").symlink_to(
+                    outside, target_is_directory=True
+                )
+            except OSError:
+                pass
+            os.chdir(root)
+            sessions = root / ".planning" / "sessions"
+            sessions.mkdir()
+            key = hook_state_module.state_key(root, "s1")
+            (sessions / f"{key}.attached").write_text("attached\n", encoding="ascii")
+            result = self._pre_llm("s1")
+            assert result is not None
+            self.assertIn("PLAN-A", result["context"])
+            self.assertNotIn("Set PLAN_ID=<slug>", result["context"])
 
     def test_active_plan_pointer_tolerates_a_utf8_bom(self) -> None:
         with self._workspace() as root:
@@ -589,7 +724,7 @@ class HermesFirstClassTests(unittest.TestCase):
 
     def test_manifest_declares_the_new_surface(self) -> None:
         manifest = (PLUGIN_ROOT / "plugin.yaml").read_text(encoding="utf-8")
-        self.assertIn("version: 0.2.0", manifest)
+        self.assertRegex(manifest, r"(?m)^version: \d+\.\d+\.\d+$")
         for hook in ("pre_llm_call", "post_tool_call", "pre_verify"):
             self.assertIn(f"  - {hook}", manifest)
         self.assertIn("pre_verify hook", manifest)

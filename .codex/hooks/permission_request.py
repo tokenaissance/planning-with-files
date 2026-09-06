@@ -18,6 +18,8 @@ def main() -> None:
 
     if not adapter.is_session_attached(root, adapter.session_id_from_payload(payload)):
         return
+    if adapter.session_plan_requires_binding(root):
+        return
 
     # Pass a relative plan root so the shell resolver returns a path that is
     # valid in both Git Bash and native Windows Python.

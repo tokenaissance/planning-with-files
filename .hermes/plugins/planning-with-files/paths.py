@@ -246,7 +246,7 @@ def resolve_plan(
     child of the root carries its own live plan (issue #212): the result is
     ``(None, [child names])`` so the caller can say why. ``explicit`` marks a
     selection that skips that check, exactly as inject-plan.sh does for a
-    ``PWF_PLAN_ROOT`` pin, an attached session, or a ``PLAN_ID`` slug.
+    ``PWF_PLAN_ROOT`` pin or a ``PLAN_ID`` slug.
     """
     planning_root = project_dir / ".planning"
     requested = plan_id if plan_id is not None else os.environ.get("PLAN_ID", "").strip()
