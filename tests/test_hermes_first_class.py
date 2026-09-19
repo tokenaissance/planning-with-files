@@ -200,13 +200,14 @@ class HermesFirstClassTests(unittest.TestCase):
             os.environ["PLAN_ID"] = ""
             self.assertEqual(active, paths_module.resolve_plan_dir(root))
 
-    def test_newest_slug_by_mtime_when_no_pointer(self) -> None:
+    def test_single_slug_discovers_without_pointer_but_multiple_require_selector(self) -> None:
         with self._workspace() as root:
             older = self._slug_plan(root, "2026-08-01-old")
-            newer = self._slug_plan(root, "2026-09-01-new")
             past = time.time() - 3600
             os.utime(older / "task_plan.md", (past, past))
-            self.assertEqual(newer, paths_module.resolve_plan_dir(root))
+            self.assertEqual(older, paths_module.resolve_plan_dir(root))
+            self._slug_plan(root, "2026-09-01-new")
+            self.assertIsNone(paths_module.resolve_plan_dir(root))
             os.environ["PLAN_ID"] = "2026-08-01-old"
             self.assertEqual(older, paths_module.resolve_plan_dir(root))
 
@@ -337,7 +338,7 @@ class HermesFirstClassTests(unittest.TestCase):
             self.assertEqual(alpha.name, "plan-a")
             self.assertEqual(beta.name, "plan-b")
 
-    def test_armed_single_plan_and_legacy_multiple_plans_keep_resolution(self) -> None:
+    def test_single_plan_resolves_but_legacy_multiple_plans_require_plan_id(self) -> None:
         with self._workspace() as root:
             self._slug_plan(root, "plan-a", text="# PLAN-A\n", pointer=True)
             os.chdir(root)
@@ -353,7 +354,14 @@ class HermesFirstClassTests(unittest.TestCase):
             self._slug_plan(root, "plan-b", text="# PLAN-B\n", pointer=True)
             legacy = self._pre_llm("unattached")
             assert legacy is not None
-            self.assertIn("PLAN-B", legacy["context"])
+            self.assertIn("Multiple plans are available", legacy["context"])
+            self.assertIn("Set PLAN_ID=<slug>", legacy["context"])
+            self.assertNotIn("PLAN-A", legacy["context"])
+            self.assertNotIn("PLAN-B", legacy["context"])
+            os.environ["PLAN_ID"] = "plan-b"
+            selected = self._pre_llm("unattached")
+            assert selected is not None
+            self.assertIn("PLAN-B", selected["context"])
 
     def test_armed_root_and_slug_plans_require_a_plan_id(self) -> None:
         with self._workspace() as root:
@@ -421,12 +429,9 @@ class HermesFirstClassTests(unittest.TestCase):
             self.assertIn("PLAN-A", result["context"])
             self.assertNotIn("Set PLAN_ID=<slug>", result["context"])
 
-    def test_active_plan_pointer_tolerates_a_utf8_bom(self) -> None:
+    def test_active_plan_pointer_tolerates_a_utf8_bom_with_single_plan(self) -> None:
         with self._workspace() as root:
             older = self._slug_plan(root, "2026-08-01-aaa")
-            self._slug_plan(root, "2026-09-01-zzz")
-            past = time.time() - 3600
-            os.utime(older / "task_plan.md", (past, past))
             (root / ".planning" / ".active_plan").write_bytes(b"\xef\xbb\xbf2026-08-01-aaa\r\n")
             self.assertEqual(older, paths_module.resolve_plan_dir(root))
 
@@ -530,6 +535,7 @@ class HermesFirstClassTests(unittest.TestCase):
     def test_python_resolver_agrees_with_inject_plan_sh(self) -> None:
         """Differential test: the shell injector and the Python resolver must agree on every fixture."""
         inject = CANONICAL_SKILL / "scripts" / "inject-plan.sh"
+        resolve = CANONICAL_SKILL / "scripts" / "resolve-plan-dir.sh"
 
         def shell_injects(root: Path, env_extra: dict[str, str]) -> bool:
             env = {k: v for k, v in os.environ.items() if k not in ENV_KEYS}
@@ -542,26 +548,62 @@ class HermesFirstClassTests(unittest.TestCase):
                 self.assertNotIn("Ambiguous plan", out)
             return "ACTIVE PLAN" in out
 
+        def shell_reports_ambiguity(root: Path) -> bool:
+            env = {k: v for k, v in os.environ.items() if k not in ENV_KEYS}
+            out = subprocess.run(
+                ["sh", str(resolve), "--check-ambiguity"], cwd=str(root), env=env,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
+            ).stdout
+            return "PWF_PLAN_AMBIGUOUS_V1" in out
+
+        def link_directory(link: Path, target: Path) -> None:
+            if os.name == "nt":
+                result = subprocess.run(
+                    ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                    capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
+                )
+                if result.returncode != 0:
+                    self.skipTest(f"could not create junction: {result.stderr or result.stdout}")
+                return
+            try:
+                link.symlink_to(target, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"could not create directory symlink: {exc}")
+
         with self._workspace() as root:
             # 1. slug plan alone: both inject
             self._slug_plan(root, "2026-09-01-parent", text="# PARENT\n", pointer=True)
             self.assertTrue(shell_injects(root, {}))
             self.assertIsNotNone(paths_module.resolve_plan_dir(root))
-            # 2. empty nested .planning: both still inject
+            # 2. a second same-root plan without PLAN_ID: both refuse
+            second = self._slug_plan(root, "2026-09-02-second", text="# SECOND\n")
+            self.assertFalse(shell_injects(root, {}))
+            self.assertIsNone(paths_module.resolve_plan_dir(root))
+            shutil.rmtree(second)
+            # 3. empty nested .planning: both still inject
             (root / "svc" / ".planning").mkdir(parents=True)
             self.assertTrue(shell_injects(root, {}))
             self.assertIsNotNone(paths_module.resolve_plan_dir(root))
-            # 3. live nested plan: both refuse
+            # 4. live nested plan: both refuse
             live = root / "svc" / ".planning" / "2026-09-01-child"
             live.mkdir()
             (live / "task_plan.md").write_text("# CHILD\n", encoding="utf-8")
             self.assertFalse(shell_injects(root, {}))
             self.assertIsNone(paths_module.resolve_plan_dir(root))
-            # 4. explicit PLAN_ID and a PWF_PLAN_ROOT pin: both inject again
+            # 5. explicit PLAN_ID and a PWF_PLAN_ROOT pin: both inject again
             self.assertTrue(shell_injects(root, {"PLAN_ID": "2026-09-01-parent"}))
             self.assertIsNotNone(paths_module.resolve_plan_dir(root, plan_id="2026-09-01-parent"))
             self.assertTrue(shell_injects(root, {"PWF_PLAN_ROOT": str(root)}))
             self.assertIsNotNone(paths_module.resolve_plan_dir(root, explicit=True))
+            # 6. a linked same-root plan is not selectable: both ignore it
+            shutil.rmtree(root / "svc")
+            linked_target = root / "linked-target"
+            linked_target.mkdir()
+            (linked_target / "task_plan.md").write_text("# LINKED\n", encoding="utf-8")
+            link_directory(root / ".planning" / "2026-09-02-linked", linked_target)
+            self.assertTrue(shell_injects(root, {}))
+            self.assertFalse(shell_reports_ambiguity(root))
+            self.assertIsNotNone(paths_module.resolve_plan_dir(root))
 
     def test_planning_disabled_suppresses_every_hook(self) -> None:
         with self._workspace() as root:
@@ -572,6 +614,154 @@ class HermesFirstClassTests(unittest.TestCase):
             self.assertIsNone(self._pre_verify())
             hooks_module.post_tool_call(tool_name="write_file", session_id="s1", args={"path": "a", "content": "b"})
             self.assertEqual([], hook_state_module.pop_reminders(root, "s1"))
+
+    # -- issue #272: the host re-homes the process-global cwd ------------------
+
+    def _hermes_reports(self, directory: Path) -> None:
+        """Point the stubbed resolve_agent_cwd at *directory* (what TERMINAL_CWD would say)."""
+        sys.modules["agent.runtime_cwd"].resolve_agent_cwd = lambda: directory  # type: ignore[attr-defined]
+
+    def _first_turn(self, session: str, platform: str = "cli"):
+        return hooks_module.pre_llm_call(user_message="hi", is_first_turn=True, session_id=session, platform=platform)
+
+    def test_rehomed_cli_session_gets_the_pin_notice_instead_of_silence(self) -> None:
+        with self._workspace() as tmp:
+            root = tmp / "project"
+            home = tmp / "home"
+            root.mkdir()
+            home.mkdir()
+            self._slug_plan(root, "2026-09-19-run", pointer=True)
+            os.chdir(root)
+            # Hermes 0.21.3: the first turn already reports the home directory
+            self._hermes_reports(home)
+            payload = self._first_turn("s1")
+            assert payload is not None
+            notice = payload["context"]
+            self.assertTrue(notice.startswith("[planning-with-files] Hermes resolved "), notice)
+            self.assertIn(str(home), notice)
+            self.assertIn(f"launch directory {root} holds a plan", notice)
+            self.assertIn("Nothing injected", notice)
+            self.assertIn(f"PWF_PLAN_ROOT={root}", notice)
+            self.assertNotIn("Build the adapter", notice)
+            # the notice is turn-scoped: the other hooks stay quiet, like the ambiguity notice
+            hooks_module.post_tool_call(tool_name="write_file", session_id="s1", args={"path": "a", "content": "b"})
+            self.assertEqual([], hook_state_module.pop_reminders(root, "s1"))
+            self.assertEqual([], hook_state_module.pop_reminders(home, "s1"))
+            self.assertIsNone(self._pre_verify("s1"))
+            # following the notice restores the plan; the pin also silences the notice
+            os.environ["PWF_PLAN_ROOT"] = str(root)
+            pinned = self._first_turn("s1")
+            assert pinned is not None
+            self.assertIn("Build the adapter", pinned["context"])
+            self.assertNotIn("Hermes resolved", pinned["context"])
+            os.environ.pop("PWF_PLAN_ROOT")
+            # a host that reports the launch directory is unchanged: plan, no notice
+            self._hermes_reports(root)
+            healthy = self._first_turn("s2")
+            assert healthy is not None
+            self.assertIn("Build the adapter", healthy["context"])
+            self.assertNotIn("Hermes resolved", healthy["context"])
+            # two selectable plans at the launch directory still count as "holds a plan"
+            self._hermes_reports(home)
+            self._slug_plan(root, "2026-09-19-other")
+            several = self._first_turn("s3")
+            assert several is not None
+            self.assertIn("holds a plan", several["context"])
+
+    def test_pin_notice_stays_silent_where_it_would_mislead(self) -> None:
+        with self._workspace() as tmp:
+            root = tmp / "project"
+            home = tmp / "home"
+            root.mkdir()
+            home.mkdir()
+            self._slug_plan(root, "2026-09-19-run", pointer=True)
+            os.chdir(root)
+            self._hermes_reports(home)
+            # only the CLI has a launch directory: gateway, TUI and Desktop sessions stay silent
+            for platform in ("telegram", "tui", "desktop", ""):
+                self.assertIsNone(self._first_turn("s9", platform), platform)
+            # PLANNING_DISABLED still silences everything
+            os.environ["PLANNING_DISABLED"] = "1"
+            self.assertIsNone(self._first_turn("s1"))
+            os.environ.pop("PLANNING_DISABLED")
+            # a launch directory without planning state: silent, as before
+            os.chdir(home)
+            self.assertIsNone(self._first_turn("s4"))
+            os.chdir(root)
+            # hermes -w: TERMINAL_CWD names <repo>/.worktrees/<name> without a chdir, by design
+            worktree = root / ".worktrees" / "hermes-abc123"
+            worktree.mkdir(parents=True)
+            self._hermes_reports(worktree)
+            self.assertIsNone(self._first_turn("s5"))
+            # a launch directory whose session isolation refuses this session: the pin would not help
+            self._hermes_reports(home)
+            (root / ".planning" / "sessions").mkdir()
+            self.assertIsNone(self._first_turn("s6"))
+            key = hook_state_module.state_key(root, "s6")
+            (root / ".planning" / "sessions" / f"{key}.attached").write_text("attached\n", encoding="ascii")
+            attached = self._first_turn("s6")
+            assert attached is not None
+            self.assertIn("holds a plan", attached["context"])
+
+    def test_slash_commands_honor_the_plan_root_pin(self) -> None:
+        with self._workspace() as tmp:
+            home = tmp / "home"
+            project = tmp / "project"
+            home.mkdir()
+            project.mkdir()
+            self._slug_plan(project, "2026-09-19-run", mode="autonomous gate", attest=True, pointer=True)
+            os.chdir(home)
+            self._hermes_reports(home)
+            self.assertEqual("No planning files found. Run planning_with_files_init first.", plugin.status_command(""))
+            os.environ["PWF_PLAN_ROOT"] = str(project)
+            self.assertIn("2026-09-19-run", plugin.status_command(""))
+            created = plugin.pwf_command("--gated Second Run")
+            self.assertIn("gated mode", created)
+            self.assertEqual(1, len(list((project / ".planning").glob("*-second-run"))))
+            self.assertFalse((home / ".planning").exists())
+            os.environ["PWF_PLAN_ROOT"] = str(tmp / "missing")
+            self.assertEqual(plugin.BROKEN_PIN_MESSAGE, plugin.status_command(""))
+            self.assertEqual(plugin.BROKEN_PIN_MESSAGE, plugin.pwf_command("--gated Third Run"))
+            self.assertFalse((home / ".planning").exists())
+            self.assertFalse((home / "task_plan.md").exists())
+
+    def test_status_command_names_the_launch_directory_plan(self) -> None:
+        with self._workspace() as tmp:
+            home = tmp / "home"
+            project = tmp / "project"
+            home.mkdir()
+            project.mkdir()
+            self._slug_plan(project, "2026-09-19-run", pointer=True)
+            os.chdir(project)
+            self._hermes_reports(home)
+            report = plugin.status_command("")
+            self.assertTrue(report.startswith("No planning files found."), report)
+            self.assertIn(f"launch directory {project} holds a plan", report)
+            self.assertIn(f"PWF_PLAN_ROOT={project}", report)
+            # the hint is diagnostic only: a plan found where Hermes points needs none
+            self._hermes_reports(project)
+            self.assertNotIn("Hermes resolved", plugin.status_command(""))
+            # worktree sessions are exempt, and the pin replaces the hint
+            worktree = project / ".worktrees" / "hermes-abc123"
+            worktree.mkdir(parents=True)
+            self._hermes_reports(worktree)
+            self.assertEqual("No planning files found. Run planning_with_files_init first.", plugin.status_command(""))
+            self._hermes_reports(home)
+            # a TUI or Desktop context pins its cwd per session: the process cwd is no launch directory
+            runtime = sys.modules["agent.runtime_cwd"]
+            runtime._SESSION_CWD = types.SimpleNamespace(get=lambda: str(home))  # type: ignore[attr-defined]
+            self.assertEqual("No planning files found. Run planning_with_files_init first.", plugin.status_command(""))
+            runtime._SESSION_CWD = types.SimpleNamespace(get=lambda: "")  # type: ignore[attr-defined]
+            self.assertIn("holds a plan", plugin.status_command(""))
+            del runtime._SESSION_CWD
+            # /pwf follows the Hermes directory and says where the plan went and what was skipped
+            created = plugin.pwf_command("Second Run")
+            self.assertIn(f"directory: {home / '.planning'}", created)
+            self.assertIn(f"launch directory {project} holds a plan", created)
+            self.assertEqual(1, len(list((home / ".planning").glob("*-second-run"))))
+            os.environ["PWF_PLAN_ROOT"] = str(project)
+            self.assertIn("2026-09-19-run", plugin.status_command(""))
+            self.assertNotIn("Hermes resolved", plugin.pwf_command("Third Run"))
 
     # -- injection ------------------------------------------------------------
 
@@ -684,6 +874,26 @@ class HermesFirstClassTests(unittest.TestCase):
             self.assertEqual("python", result["route"])
             self.assertEqual("2026-09-01-run", result["plan_id"])
             self.assertIn("ALL PHASES COMPLETE", result["stdout"])
+
+    def test_status_and_check_complete_require_selector_for_multiple_plans(self) -> None:
+        with self._workspace() as root:
+            self._slug_plan(root, "plan-a", text=COMPLETE_PLAN, pointer=True)
+            self._slug_plan(root, "plan-b", text=COMPLETE_PLAN)
+
+            status = json.loads(tools_module.planning_with_files_status(cwd=str(root)))
+            self.assertFalse(status["exists"])
+            self.assertIn("Multiple plans are available", status["message"])
+            self.assertIn("Set PLAN_ID=<slug>", status["message"])
+
+            complete = json.loads(tools_module.planning_with_files_check_complete(cwd=str(root)))
+            self.assertFalse(complete["ok"])
+            self.assertFalse(complete["complete"])
+            self.assertIn("Multiple plans are available", complete["error"])
+
+            os.environ["PLAN_ID"] = "plan-a"
+            selected = json.loads(tools_module.planning_with_files_status(cwd=str(root)))
+            self.assertTrue(selected["exists"])
+            self.assertEqual("plan-a", selected["plan_id"])
 
     # -- registration and slash commands -------------------------------------
 

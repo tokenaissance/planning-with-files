@@ -12,6 +12,11 @@ SKILL_DIR_NAME = "planning-with-files"
 # underscore. Rejects traversal, separators, and whitespace by construction.
 _SLUG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
 _REPARSE_ATTR = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+MULTIPLE_PLANS_NOTICE = (
+    "[planning-with-files] Multiple plans are available. "
+    "Set PLAN_ID=<slug> for this session; nothing injected."
+)
+MULTIPLE_PLANS_MESSAGE = "Multiple plans are available. Set PLAN_ID=<slug> to select one."
 
 
 def has_skill_assets(candidate: Path) -> bool:
@@ -136,6 +141,16 @@ def _is_regular_file(path: Path) -> bool:
     return stat.S_ISREG(info.st_mode)
 
 
+def _is_real_dir(path: Path) -> bool:
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & _REPARSE_ATTR:
+        return False
+    return stat.S_ISDIR(info.st_mode)
+
+
 def slug_is_valid(slug: str) -> bool:
     return bool(slug) and _SLUG_RE.match(slug) is not None
 
@@ -197,6 +212,39 @@ def _read_active_pointer(planning_root: Path) -> str:
     return lines[0] if len(lines) == 1 else ""
 
 
+def count_selectable_plans(project_dir: Path) -> int:
+    """Count plans exactly as inject-plan.sh does before guessing a selection.
+
+    A legacy root plan counts only after session isolation is armed. Every
+    contained valid slug directory with a regular task_plan.md counts. The
+    caller only needs to distinguish zero/one from "more than one", so stop at
+    two.
+    """
+    planning_root = project_dir / ".planning"
+    count = 0
+    if _is_real_dir(planning_root / "sessions") and _is_regular_file(project_dir / "task_plan.md"):
+        count = 1
+    try:
+        entries = list(planning_root.iterdir())
+    except OSError:
+        return count
+    for entry in entries:
+        if not slug_is_valid(entry.name):
+            continue
+        if _slug_plan_dir(planning_root, entry.name) is None:
+            continue
+        count += 1
+        if count > 1:
+            break
+    return count
+
+
+def multiple_plans_require_selector(project_dir: Path, *, plan_id: str | None = None) -> bool:
+    """True when shared pointer/mtime guesses cannot identify this session's plan."""
+    requested = plan_id if plan_id is not None else os.environ.get("PLAN_ID", "").strip()
+    return not requested and count_selectable_plans(project_dir) > 1
+
+
 def nested_live_plans(root: Path) -> list[str]:
     """Direct children whose own .planning holds a live plan (<slug>/task_plan.md).
 
@@ -236,17 +284,20 @@ def resolve_plan(
 ) -> tuple[Path | None, list[str]]:
     """Resolve the active plan directory; return it with any nested conflicts.
 
-    Precedence mirrors resolve-plan-dir.sh: an explicit plan id (the PLAN_ID
-    environment variable when not passed), then .planning/.active_plan, then
-    the newest .planning/<slug>/task_plan.md by modification time, then the
-    legacy root task_plan.md. Slugs are validated and the chosen directory
-    must stay inside .planning (no symlink or junction escape).
+    Precedence mirrors resolve-plan-dir.sh: a non-empty explicit plan id (the
+    PLAN_ID environment variable when not passed) is binding. Without one,
+    more than one selectable same-root plan is refused; otherwise resolution
+    continues through .planning/.active_plan, the newest
+    .planning/<slug>/task_plan.md by modification time, then the legacy root
+    task_plan.md. Slugs are validated and the chosen directory must stay
+    inside .planning (no symlink or junction escape).
 
     A cwd guess (pointer, newest, or legacy root) is refused when a direct
     child of the root carries its own live plan (issue #212): the result is
     ``(None, [child names])`` so the caller can say why. ``explicit`` marks a
-    selection that skips that check, exactly as inject-plan.sh does for a
-    ``PWF_PLAN_ROOT`` pin or a ``PLAN_ID`` slug.
+    project-root selection that skips only that nested-root check, exactly as
+    inject-plan.sh does for a valid ``PWF_PLAN_ROOT`` pin. It never selects one
+    of several same-root plans; that still requires ``PLAN_ID``.
     """
     planning_root = project_dir / ".planning"
     requested = plan_id if plan_id is not None else os.environ.get("PLAN_ID", "").strip()
@@ -269,6 +320,12 @@ def resolve_plan(
         explicit_dir = _slug_plan_dir(planning_root, requested)
         if explicit_dir is not None:
             return explicit_dir, []
+        return None, []
+
+    # A shared .active_plan pointer or directory mtime cannot identify which
+    # same-root task this session owns. PWF_PLAN_ROOT selects the project, not
+    # one of its plans, so even an explicit root pin does not lift this refusal.
+    if count_selectable_plans(project_dir) > 1:
         return None, []
 
     chosen: Path | None = None

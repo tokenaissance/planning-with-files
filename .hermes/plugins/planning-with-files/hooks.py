@@ -9,27 +9,22 @@ from .constants import PROGRESS_TAIL_LINES, READ_PREVIEW_LINES
 from .context_frame import frame_bytes, read_regular_bytes, select_lines, verified_frame
 from .hook_state import add_reminder, pop_reminders, state_key
 from .paths import (
+    MULTIPLE_PLANS_NOTICE,
     ambiguity_notice,
     attestation_path_for,
     effective_project_root,
+    multiple_plans_require_selector,
     normalize_cwd,
     plan_id_for,
     plan_root_is_pinned,
     resolve_plan,
     resolve_plan_dir,
-    slug_is_valid,
 )
 from .planning_files import evaluate_gate, normalize_wall_clock
 
 ATTACH_LEGACY = "legacy"      # no .planning/sessions directory: single-session setup
 ATTACH_ATTACHED = "attached"  # sessions directory armed and this session holds a sentinel
 ATTACH_DETACHED = "detached"  # sessions directory armed, no sentinel (or unsafe directory)
-SESSION_PLAN_BINDING_NOTICE = (
-    "[planning-with-files] Multiple plans are available while session isolation "
-    "is armed. Set PLAN_ID=<slug> for this session; nothing injected."
-)
-
-
 def _runtime_project_dir(kwargs: dict[str, Any]) -> Path | None:
     """Resolve the active Hermes project, never a cached import-time cwd.
 
@@ -59,6 +54,66 @@ def _runtime_project_dir(kwargs: dict[str, Any]) -> Path | None:
     return effective_project_root(project)
 
 
+WORKTREES_DIR_NAME = ".worktrees"  # hermes -w and /worktree new place trees at <repo>/.worktrees/<name>
+
+
+def launch_dir_has_planning_state(launch: Path) -> bool:
+    """True when the process launch directory holds a plan, or several plans.
+
+    A plan with a nested-root conflict still counts (``explicit=True`` skips
+    only that check), because the question here is whether the directory the
+    session was started in carries planning state at all.
+    """
+    return (
+        resolve_plan(launch, explicit=True)[0] is not None
+        or multiple_plans_require_selector(launch)
+    )
+
+
+def launch_dir_notice(project_dir: Path, launch: Path) -> str:
+    """The once-per-turn line for issue #272; the resolved root and the launch directory differ."""
+    return (
+        f"[planning-with-files] Hermes resolved {project_dir} as the working directory, "
+        f"but the launch directory {launch} holds a plan. Nothing injected. "
+        f"Pin the thread with PWF_PLAN_ROOT={launch}."
+    )
+
+
+def _launch_dir_notice(project_dir: Path, kwargs: dict[str, Any]) -> str | None:
+    """Issue #272: the resolved root holds no plan while the launch directory does.
+
+    Hermes 0.21.3 rewrites the process-global TERMINAL_CWD during the first
+    turn of a CLI session (``agent/relay_runtime.py`` imports ``gateway/run.py``
+    lazily; its import-time bridge applies the ``Path.home()`` fallback), so
+    ``resolve_agent_cwd`` names the home directory while ``os.getcwd()`` still
+    names the directory the session was started in (upstream hermes-agent
+    #86411 and #95577). The rewrite runs before the first hook, so the adapter
+    cannot recover the root on its own and never switches to the launch
+    directory: it says why nothing was injected and names the pin.
+
+    Silent by design: platforms other than the CLI (their process cwd is not a
+    launch directory), Hermes worktree sessions (``hermes -w`` points
+    TERMINAL_CWD at ``<repo>/.worktrees/<name>`` without a chdir, which is the
+    intended split), a launch directory without planning state, and a launch
+    directory whose session isolation refuses this session anyway.
+    """
+    if str(kwargs.get("platform", "")).strip().lower() != "cli":
+        return None
+    if WORKTREES_DIR_NAME in project_dir.parts:
+        return None
+    try:
+        launch = normalize_cwd(os.getcwd())
+        if not launch.is_dir() or launch == project_dir:
+            return None
+        if _session_attachment(launch, _session_id(kwargs)) == ATTACH_DETACHED:
+            return None
+        if not launch_dir_has_planning_state(launch):
+            return None
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return launch_dir_notice(project_dir, launch)
+
+
 def _session_attachment(project_dir: Path, session_id: str) -> str:
     """Opt-in isolation state once a project creates its sessions directory."""
     sessions_dir = project_dir / ".planning" / "sessions"
@@ -84,50 +139,6 @@ def _session_attachment(project_dir: Path, session_id: str) -> str:
         return ATTACH_DETACHED
 
 
-def _is_live_plan_file(path: Path) -> bool:
-    try:
-        info = path.lstat()
-    except OSError:
-        return False
-    attrs = getattr(info, "st_file_attributes", 0)
-    return (
-        stat.S_ISREG(info.st_mode)
-        and not stat.S_ISLNK(info.st_mode)
-        and not attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    )
-
-
-def _session_plan_requires_binding(project_dir: Path) -> bool:
-    """True when an attached session must select a same-root plan by PLAN_ID."""
-    if os.environ.get("PLAN_ID", "").strip():
-        return False
-    candidates = 1 if _is_live_plan_file(project_dir / "task_plan.md") else 0
-    planning_dir = project_dir / ".planning"
-    try:
-        children = planning_dir.iterdir()
-        for child in children:
-            if not slug_is_valid(child.name):
-                continue
-            try:
-                info = child.lstat()
-            except OSError:
-                continue
-            attrs = getattr(info, "st_file_attributes", 0)
-            if (
-                not stat.S_ISDIR(info.st_mode)
-                or stat.S_ISLNK(info.st_mode)
-                or attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-            ):
-                continue
-            if _is_live_plan_file(child / "task_plan.md"):
-                candidates += 1
-                if candidates > 1:
-                    return True
-    except (OSError, RuntimeError):
-        return True
-    return False
-
-
 def _resolve_plan(project_dir: Path, *, explicit: bool = False) -> tuple[Path | None, list[str]]:
     """Active plan directory whose task_plan.md is a regular file, plus nested conflicts."""
     plan_dir, conflicts = resolve_plan(project_dir, explicit=explicit)
@@ -148,7 +159,7 @@ def _session_id(kwargs: dict[str, Any]) -> str:
 def _locate(
     kwargs: dict[str, Any],
 ) -> tuple[Path | None, Path | None, list[str], str, bool]:
-    """Shared front half: project, plan, conflicts, session id, binding refusal.
+    """Shared front half: project, plan, conflicts, session id, selector refusal.
 
     PWF_PLAN_ROOT selects the effective project root. PLAN_ID selects a plan
     within it. A session attachment is admission only and never skips either
@@ -161,7 +172,7 @@ def _locate(
     attachment = _session_attachment(project_dir, session_id)
     if attachment == ATTACH_DETACHED:
         return project_dir, None, [], session_id, False
-    if attachment == ATTACH_ATTACHED and _session_plan_requires_binding(project_dir):
+    if multiple_plans_require_selector(project_dir):
         return project_dir, None, [], session_id, True
     explicit = plan_root_is_pinned()
     plan_dir, conflicts = _resolve_plan(project_dir, explicit=explicit)
@@ -213,16 +224,20 @@ def build_user_prompt_context(project_dir: Path, plan_dir: Path | None = None) -
 
 
 def pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
-    project_dir, plan_dir, conflicts, session_id, binding_required = _locate(kwargs)
+    project_dir, plan_dir, conflicts, session_id, selector_required = _locate(kwargs)
     if project_dir is None:
         return None
     if plan_dir is None:
         # The refusal holds in every hook; the notice is turn-scoped, so only
         # this once-per-turn hook says why (same split as inject-plan.sh).
-        if binding_required:
-            return {"context": SESSION_PLAN_BINDING_NOTICE}
+        if selector_required:
+            return {"context": MULTIPLE_PLANS_NOTICE}
         if conflicts:
             return {"context": ambiguity_notice(conflicts)}
+        if not plan_root_is_pinned():
+            notice = _launch_dir_notice(project_dir, kwargs)
+            if notice:
+                return {"context": notice}
         return None
     user_message = str(kwargs.get("user_message", ""))
     reminder_messages = pop_reminders(project_dir, session_id)
@@ -252,7 +267,7 @@ def post_tool_call(**kwargs: Any) -> None:
             return None
     else:
         return None
-    project_dir, plan_dir, _conflicts, session_id, _binding_required = _locate(kwargs)
+    project_dir, plan_dir, _conflicts, session_id, _selector_required = _locate(kwargs)
     if project_dir is None or plan_dir is None:
         return None
     message = "[planning-with-files] Update progress.md with what you just did. If a phase is now complete, update task_plan.md status."
@@ -269,7 +284,7 @@ def pre_verify(**kwargs: Any) -> dict[str, str] | None:
     plan without the ``gate`` token stays advisory and this hook returns None,
     so legacy and autonomous plans never hold a turn open.
     """
-    project_dir, plan_dir, _conflicts, _session_id, _binding_required = _locate(kwargs)
+    project_dir, plan_dir, _conflicts, _session_id, _selector_required = _locate(kwargs)
     if project_dir is None or plan_dir is None:
         return None
     try:
