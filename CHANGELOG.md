@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.20.4] - 2026-09-19
+
+### Fixed
+- PowerShell route on OneDrive: `resolve-plan-dir.ps1`, the Cursor hook `resolve-plan-context.ps1` and `set-active-plan.ps1` refused an `.active_plan` pointer that carried the `ReparsePoint` file attribute. OneDrive Files On-Demand sets that attribute on every synced file, so in a project under OneDrive the Cursor hooks stopped with the unsafe-pointer notice instead of injecting the pointed plan, the resolver printed nothing for `attest-plan.ps1` and `check-complete.ps1`, and `set-active-plan.ps1` refused to write, while every other route read the pointer normally. The three checks now refuse a container or a `LinkType` of `SymbolicLink` or `Junction`, the predicate v3.20.3 gave the directory checks and the `[ -L ]` of the shell scripts. `attest-plan.ps1` had the same class of check in its native helper and refused to hash, show or clear any reparse-point file, so attestation failed in every project under OneDrive while `init-session.ps1` still reported the plan as attested; it now refuses only name-surrogate reparse points (symlinks, junctions and unknown surrogate tags), which is the set Windows path parsing follows (#275).
+- `tests/test_session_catchup_copies_exact_basename.py` walked the whole checkout and loaded any untracked `session-catchup.py`, so a stale clone kept under the gitignored `.planning/` on a maintainer machine failed the two tests with 120 subtests while CI stayed green. The copies now come from `git ls-files`; the filtered walk is kept only for a checkout without git (#274).
+
+## [3.20.3] - 2026-09-19
+
+### Fixed
+- A symlinked or junctioned directory under `.planning/` is never a plan, on every route that resolves plans. `inject-plan.sh` and `resolve-plan-dir.sh --check-ambiguity` counted a linked plan directory toward the several-plans rule while the Hermes plugin did not, so the shell route refused a tree that Hermes injected (#270). The counters now skip linked directories (PR #271). Skipping the link in the counter alone left the selection paths following it through containment: one real plan plus a newer linked one counted as one plan and the newest-mtime scan then selected the linked directory, the mtime guess the #240 rule exists to prevent. The shell family (`resolve-plan-dir.sh`, `inject-plan.sh`, `resolve-plan-dir.ps1`, the Python twin `inject-plan.py`) therefore refuses a linked plan directory in the `PLAN_ID`, `.active_plan` and newest-mtime branches as well; a `PLAN_ID` that names one fails closed with the existing "does not name a plan directory" notice, and a pointer that names one falls through like a stale pointer. The Codex adapter and the OpenCode and DeepSeek Harness plugin cores skip linked directories in their counters, which their selection already did. `set-active-plan.sh` and `set-active-plan.ps1` refuse to point the shared default at a linked directory and leave it out of `--list`. The link test is symlink or junction only (`[ -L ]`, `is_link`, `LinkType`), never the bare ReparsePoint attribute: OneDrive Files On-Demand marks every synced directory as a reparse point, and those stay plans. Untouched on purpose: the Pi extension keeps its armed-only containment rule, and the nested-root probes still count a linked nested plan as a conflict, which only ever refuses. Every shipped copy is synced; the sh/py parity suite, the cross-route ambiguity suite and the pointer tool suite carry the linked-directory fixture (junction on Windows, symlink elsewhere).
+
+### Thanks
+- @ShaunLinTW, for the shell counter change with the Hermes differential regression in #271.
+
 ## [3.20.2] - 2026-09-19
 
 ### Fixed
