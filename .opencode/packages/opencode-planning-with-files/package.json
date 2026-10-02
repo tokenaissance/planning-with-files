@@ -1,6 +1,6 @@
 {
   "name": "opencode-planning-with-files",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Native OpenCode plugin for planning-with-files: per-turn plan injection, write reminders, compaction flush, a session-idle completion gate, and pwf_init / pwf_status / pwf_check tools.",
   "type": "module",
   "main": "dist/index.js",
@@ -43,7 +43,8 @@
     "url": "https://github.com/OthmanAdi/planning-with-files/issues"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "^1.18.16"
+    "@opencode-ai/plugin": "^1.18.16",
+    "@opencode/plugin": "2.0.21"
   },
   "devDependencies": {
     "@types/node": "^22.10.1",
